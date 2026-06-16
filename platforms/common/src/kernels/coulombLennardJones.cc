@@ -1,6 +1,47 @@
 {
 #if USE_EWALD
     unsigned int includeInteraction = (!isExcluded && r2 < CUTOFF_SQUARED);
+#if USE_ESP
+#if HAS_COULOMB
+    const real prefactor = ONE_4PI_EPS0*CHARGE1*CHARGE2*invR;
+#else
+    const real prefactor = 0.0f;
+#endif
+    real tempForce = 0.0f;
+#if HAS_LENNARD_JONES
+    real sig = SIGMA_EPSILON1.x + SIGMA_EPSILON2.x;
+    real sig2 = invR*sig;
+    sig2 *= sig2;
+    real sig6 = sig2*sig2*sig2;
+    real eps = SIGMA_EPSILON1.y*SIGMA_EPSILON2.y;
+    real epssig6 = sig6*eps;
+    tempForce = epssig6*(12.0f*sig6 - 6.0f);
+    real ljEnergy = epssig6*(sig6 - 1.0f);
+    #if USE_LJ_SWITCH
+    if (r > LJ_SWITCH_CUTOFF) {
+        real x = r-LJ_SWITCH_CUTOFF;
+        real switchValue = 1+x*x*x*(LJ_SWITCH_C3+x*(LJ_SWITCH_C4+x*LJ_SWITCH_C5));
+        real switchDeriv = x*x*(3*LJ_SWITCH_C3+x*(4*LJ_SWITCH_C4+x*5*LJ_SWITCH_C5));
+        tempForce = tempForce*switchValue - ljEnergy*switchDeriv*r;
+        ljEnergy *= switchValue;
+    }
+    #endif
+    tempEnergy += includeInteraction ? ljEnergy : 0;
+#endif
+#if HAS_COULOMB
+    real scaledR = r*ESP_INV_CUTOFF;
+    real insideCutoff = (scaledR < (real) 1 ? (real) 1 : (real) 0);
+    real scaledEvalR = (scaledR < (real) 1 ? scaledR : (real) 1);
+    real scaledT = 2.0f*scaledEvalR-1.0f;
+#ifdef INCLUDE_ENERGY
+    real longRangeEnergyScale = ESP_LONG_RANGE_ENERGY_POLY;
+    tempEnergy += includeInteraction ? prefactor*insideCutoff*(1.0f-longRangeEnergyScale) : 0;
+#endif
+    real shortRangeForceScale = insideCutoff*(1.0f-(ESP_LONG_RANGE_FORCE_POLY));
+    tempForce += prefactor*shortRangeForceScale;
+#endif
+    dEdR += includeInteraction ? tempForce*invR*invR : 0;
+#else
     const real alphaR = EWALD_ALPHA*r;
     const real expAlphaRSqr = EXP(-alphaR*alphaR);
 #if HAS_COULOMB
@@ -74,6 +115,7 @@
     tempEnergy += includeInteraction ? prefactor*erfcAlphaR : 0;
 #endif
     dEdR += includeInteraction ? tempForce*invR*invR : 0;
+#endif
 #else
 #ifdef USE_CUTOFF
     unsigned int includeInteraction = (!isExcluded && r2 < CUTOFF_SQUARED);

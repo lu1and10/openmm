@@ -183,7 +183,7 @@ private:
     int espOutputTileNumBins, espOutputTileNumScanBlocks, espOutputTileSpreadThreads;
     int stepsToSort;
     bool usePmeQueue, deviceIsCpu, useFixedPointChargeSpreading, useCpuPme;
-    bool hasCoulomb, hasLJ, doLJPME, useEsp, useEspOutputTileSpread, usePosqCharges, recomputeParams, hasOffsets;
+    bool hasCoulomb, hasLJ, doLJPME, useEsp, useEspOutputTileSpread, useEspOutputTileInterp, usePosqCharges, recomputeParams, hasOffsets;
     NonbondedMethod nonbondedMethod;
     static const int PmeOrder = 5;
     static const int EspOutputTileScanBlockSize = 1024;

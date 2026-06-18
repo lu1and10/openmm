@@ -59,6 +59,16 @@ size_t estimateEspOutputTileSharedMemory(int espOrder, bool useDoublePrecision) 
     return localGridSize+localStartSize+chargeSize+thetaSize;
 }
 
+size_t estimateEspOutputTileInterpSharedMemory(int espOrder, bool useDoublePrecision) {
+    int paddedSize = EspOutputTileBinSize+2*((espOrder+1)/2);
+    int localSize = paddedSize*paddedSize*paddedSize;
+    return localSize*(useDoublePrecision ? sizeof(double) : sizeof(float));
+}
+
+bool canUseSharedMemoryKernel(ComputeContext& cc, size_t sharedBytes, int threads) {
+    return cc.computeThreadBlockSize(1.05*sharedBytes/threads) >= threads;
+}
+
 string createHornerExpression(const vector<double>& coeffs, const string& x, const ComputeContext& cc) {
     if (coeffs.empty())
         return "0.0f";
@@ -333,6 +343,7 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
     doLJPME = (nonbondedMethod == LJPME && hasLJ);
     useEsp = false;
     useEspOutputTileSpread = false;
+    useEspOutputTileInterp = false;
     espOutputTileNumBins = 0;
     espOutputTileNumScanBlocks = 0;
     espOutputTileSpreadThreads = 0;
@@ -542,11 +553,13 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
                     if (espOutputTileNumScanBlocks > EspOutputTileScanBlockSize)
                         throw OpenMMException("ESP output-tile spread grid has too many bins for the current lightweight scan.");
                     espOutputTileSpreadThreads = min(256, max(outputTileSpreadOrderVolume, 16));
-                    size_t sharedBytes = estimateEspOutputTileSharedMemory(espStencilOrder, cc.getUseDoublePrecision());
-                    if (cc.computeThreadBlockSize(1.05*sharedBytes/espOutputTileSpreadThreads) < espOutputTileSpreadThreads)
+                    if (!canUseSharedMemoryKernel(cc, estimateEspOutputTileSharedMemory(espStencilOrder, cc.getUseDoublePrecision()), espOutputTileSpreadThreads))
                         useEspOutputTileSpread = false;
                     else {
+                        useEspOutputTileInterp = canUseSharedMemoryKernel(cc, estimateEspOutputTileInterpSharedMemory(espStencilOrder, cc.getUseDoublePrecision()), espOutputTileSpreadThreads);
                         pmeDefines["USE_ESP_OUTPUT_TILE_SPREAD"] = "1";
+                        if (useEspOutputTileInterp)
+                            pmeDefines["USE_ESP_OUTPUT_TILE_INTERP"] = "1";
                         pmeDefines["ESP_OUTPUT_TILE_BIN_SIZE"] = cc.intToString(outputTileBinSize);
                         pmeDefines["ESP_OUTPUT_TILE_NP"] = cc.intToString(EspOutputTileBatchSize);
                         pmeDefines["ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE"] = cc.intToString(EspOutputTileScanBlockSize);
@@ -974,7 +987,7 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
             pmeSpreadChargeKernel = program->createKernel(useEspOutputTileSpread ? "gridSpreadChargeOutputTile" : "gridSpreadCharge");
             pmeConvolutionKernel = program->createKernel("reciprocalConvolution");
             pmeEvalEnergyKernel = program->createKernel("gridEvaluateEnergy");
-            pmeInterpolateForceKernel = program->createKernel("gridInterpolateForce");
+            pmeInterpolateForceKernel = program->createKernel(useEspOutputTileInterp ? "gridInterpolateForceOutputTile" : "gridInterpolateForce");
             if (useEspOutputTileSpread) {
                 pmeOutputTileInitBinsKernel = program->createKernel("initOutputTileBins");
                 pmeOutputTileCountBinsKernel = program->createKernel("countOutputTileBinSizes");
@@ -1041,7 +1054,15 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
             pmeInterpolateForceKernel->addArg(pmeGrid1);
             for (int i = 0; i < 8; i++)
                 pmeInterpolateForceKernel->addArg();
-            pmeInterpolateForceKernel->addArg(pmeAtomGridIndex);
+            if (useEspOutputTileInterp) {
+                pmeInterpolateForceKernel->addArg(espOutputTileAtomGridPosition);
+                pmeInterpolateForceKernel->addArg(espOutputTileBinSize);
+                pmeInterpolateForceKernel->addArg(espOutputTileBinStart);
+                pmeInterpolateForceKernel->addArg(espOutputTileScanBlockOffsets);
+                pmeInterpolateForceKernel->addArg(espOutputTileSortedAtoms);
+            }
+            else
+                pmeInterpolateForceKernel->addArg(pmeAtomGridIndex);
             pmeInterpolateForceKernel->addArg(charges);
             if (useEsp) {
                 pmeInterpolateForceKernel->addArg(espSpreadCoeffs);
@@ -1280,7 +1301,9 @@ double CommonCalcNonbondedForceKernel::execute(ContextImpl& context, bool includ
                 pmeInterpolateForceKernel->setArg(9, recipBoxVectorsFloat[1]);
                 pmeInterpolateForceKernel->setArg(10, recipBoxVectorsFloat[2]);
             }
-            if (deviceIsCpu)
+            if (useEspOutputTileInterp)
+                pmeInterpolateForceKernel->executeBlocks(espOutputTileNumBins, espOutputTileSpreadThreads);
+            else if (deviceIsCpu)
                 pmeInterpolateForceKernel->execute(cc.getNumThreadBlocks(), 1);
             else
                 pmeInterpolateForceKernel->execute(cc.getNumAtoms());

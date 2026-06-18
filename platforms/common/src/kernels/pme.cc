@@ -364,6 +364,112 @@ KERNEL void gridSpreadChargeOutputTile(GLOBAL const real4* RESTRICT posq,
     }
 }
 
+#ifdef USE_ESP_OUTPUT_TILE_INTERP
+
+KERNEL void gridInterpolateForceOutputTile(GLOBAL const real4* RESTRICT posq, GLOBAL mm_ulong* RESTRICT forceBuffers,
+        GLOBAL const real* RESTRICT pmeGrid,
+        real4 periodicBoxSize, real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ,
+        real4 recipBoxVecX, real4 recipBoxVecY, real4 recipBoxVecZ,
+        GLOBAL const real4* RESTRICT espOutputTileAtomGridPosition, GLOBAL const int* RESTRICT binSize,
+        GLOBAL const int* RESTRICT binStart, GLOBAL const int* RESTRICT scanBlockOffsets,
+        GLOBAL const int* RESTRICT sortedAtoms,
+#ifdef CHARGE_FROM_SIGEPS
+        GLOBAL const float2* RESTRICT sigmaEpsilon,
+#else
+        GLOBAL const real* RESTRICT charges,
+#endif
+        GLOBAL const real* RESTRICT espSpreadCoeffs, GLOBAL const real* RESTRICT espSpreadDerCoeffs) {
+    LOCAL real localGrid[ESP_OUTPUT_TILE_LOCAL_SIZE];
+    real3 data[ESP_ORDER];
+    real3 ddata[ESP_ORDER];
+
+    int bin = GROUP_ID;
+    int block = bin/ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE;
+    int segmentStart = binStart[bin]+scanBlockOffsets[block];
+    int segmentSize = binSize[bin];
+    if (segmentSize == 0)
+        return;
+    int segmentEnd = segmentStart+segmentSize;
+
+    int tmp = bin;
+    int binZ = tmp%ESP_OUTPUT_TILE_NUM_BINS_Z;
+    tmp /= ESP_OUTPUT_TILE_NUM_BINS_Z;
+    int binY = tmp%ESP_OUTPUT_TILE_NUM_BINS_Y;
+    int binX = tmp/ESP_OUTPUT_TILE_NUM_BINS_Y;
+    int3 binOffset = make_int3(binX*ESP_OUTPUT_TILE_BIN_SIZE, binY*ESP_OUTPUT_TILE_BIN_SIZE, binZ*ESP_OUTPUT_TILE_BIN_SIZE);
+
+    for (int i = LOCAL_ID; i < ESP_OUTPUT_TILE_LOCAL_SIZE; i += LOCAL_SIZE) {
+        int tmp = i;
+        int localZ = tmp%ESP_OUTPUT_TILE_PADDED_SIZE;
+        tmp /= ESP_OUTPUT_TILE_PADDED_SIZE;
+        int localY = tmp%ESP_OUTPUT_TILE_PADDED_SIZE;
+        int localX = tmp/ESP_OUTPUT_TILE_PADDED_SIZE;
+        int x = espOutputTileWrapIndex(binOffset.x+localX, GRID_SIZE_X);
+        int y = espOutputTileWrapIndex(binOffset.y+localY, GRID_SIZE_Y);
+        int z = espOutputTileWrapIndex(binOffset.z+localZ, GRID_SIZE_Z);
+        localGrid[i] = pmeGrid[(x*GRID_SIZE_Y+y)*GRID_SIZE_Z+z];
+    }
+    SYNC_THREADS
+
+    for (int sortedIndex = segmentStart+LOCAL_ID; sortedIndex < segmentEnd; sortedIndex += LOCAL_SIZE) {
+        int atom = sortedAtoms[sortedIndex];
+        real4 t = espOutputTileAtomGridPosition[atom];
+        real4 pos = make_real4(0, 0, 0, t.w);
+        real3 force = make_real3(0);
+        int3 gridIndex = make_int3((int) t.x, (int) t.y, (int) t.z);
+        int3 localStart = make_int3(gridIndex.x-binOffset.x, gridIndex.y-binOffset.y, gridIndex.z-binOffset.z);
+#ifdef CHARGE_FROM_SIGEPS
+        const float2 sigEps = sigmaEpsilon[atom];
+        real q = 8*sigEps.x*sigEps.x*sigEps.x*sigEps.y;
+#else
+        real q = CHARGE*EPSILON_FACTOR;
+#endif
+        if (q == 0)
+            continue;
+
+        real3 dr = make_real3(t.x-(int) t.x, t.y-(int) t.y, t.z-(int) t.z);
+        for (int j = 0; j < ESP_ORDER; j++)
+            data[j] = espHorner3(espSpreadCoeffs, j, ESP_ORDER, ESP_POLY_ORDER, dr);
+        for (int j = 0; j < ESP_ORDER; j++)
+            ddata[j] = espHorner3(espSpreadDerCoeffs, j, ESP_ORDER, ESP_DER_POLY_ORDER, dr);
+
+        for (int ix = 0; ix < ESP_ORDER; ix++) {
+            int xbase = (localStart.x+ix)*ESP_OUTPUT_TILE_PADDED_SIZE*ESP_OUTPUT_TILE_PADDED_SIZE;
+            real dx = data[ix].x;
+            real ddx = ddata[ix].x;
+            for (int iy = 0; iy < ESP_ORDER; iy++) {
+                int ybase = xbase + (localStart.y+iy)*ESP_OUTPUT_TILE_PADDED_SIZE;
+                real dy = data[iy].y;
+                real ddy = ddata[iy].y;
+                real zsum = 0;
+                real dzsum = 0;
+                for (int iz = 0; iz < ESP_ORDER; iz++) {
+                    real gridvalue = localGrid[ybase+localStart.z+iz];
+                    zsum += data[iz].z*gridvalue;
+                    dzsum += ddata[iz].z*gridvalue;
+                }
+                force.x += ddx*dy*zsum;
+                force.y += dx*ddy*zsum;
+                force.z += dx*dy*dzsum;
+            }
+        }
+        real forceX = -q*(force.x*GRID_SIZE_X*recipBoxVecX.x);
+        real forceY = -q*(force.x*GRID_SIZE_X*recipBoxVecY.x+force.y*GRID_SIZE_Y*recipBoxVecY.y);
+        real forceZ = -q*(force.x*GRID_SIZE_X*recipBoxVecZ.x+force.y*GRID_SIZE_Y*recipBoxVecZ.y+force.z*GRID_SIZE_Z*recipBoxVecZ.z);
+#ifdef USE_PME_STREAM
+        ATOMIC_ADD(&forceBuffers[atom], (mm_ulong) realToFixedPoint(forceX));
+        ATOMIC_ADD(&forceBuffers[atom+PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(forceY));
+        ATOMIC_ADD(&forceBuffers[atom+2*PADDED_NUM_ATOMS], (mm_ulong) realToFixedPoint(forceZ));
+#else
+        forceBuffers[atom] += (mm_ulong) realToFixedPoint(forceX);
+        forceBuffers[atom+PADDED_NUM_ATOMS] += (mm_ulong) realToFixedPoint(forceY);
+        forceBuffers[atom+2*PADDED_NUM_ATOMS] += (mm_ulong) realToFixedPoint(forceZ);
+#endif
+    }
+}
+
+#endif
+
 #endif
 
 #ifdef USE_FIXED_POINT_CHARGE_SPREADING

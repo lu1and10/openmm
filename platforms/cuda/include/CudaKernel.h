@@ -63,6 +63,7 @@ public:
      *                     default size that is appropriate for the computing device is used.
      */
     void execute(int threads, int blockSize=-1);
+    void executeBlocks(int blocks, int blockSize);
 protected:
     /**
      * Add an argument to pass the kernel when it is invoked, where the value is a

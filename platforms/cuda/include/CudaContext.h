@@ -317,6 +317,7 @@ public:
      * @param sharedSize   the amount of dynamic shared memory to allocated for the kernel, in bytes
      */
     void executeKernel(CUfunction kernel, void** arguments, int workUnits, int blockSize = -1, unsigned int sharedSize = 0);
+    void executeKernelBlocks(CUfunction kernel, void** arguments, int blocks, int blockSize, unsigned int sharedSize = 0);
     /**
      * Compute the largest thread block size that can be used for a kernel that requires a particular amount of
      * shared memory per thread.

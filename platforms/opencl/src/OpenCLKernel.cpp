@@ -44,11 +44,22 @@ void OpenCLKernel::execute(int threads, int blockSize) {
     // Set args that are specified by OpenCLArrays.  We can't do this earlier, because it's
     // possible resize() will get called on an array, causing its internal storage to be
     // recreated.
-    
+
     for (int i = 0; i < arrayArgs.size(); i++)
         if (arrayArgs[i] != NULL)
             kernel.setArg<cl::Buffer>(i, arrayArgs[i]->getDeviceBuffer());
     context.executeKernel(kernel, threads, blockSize);
+}
+
+void OpenCLKernel::executeBlocks(int blocks, int blockSize) {
+    // Set args that are specified by OpenCLArrays.  We can't do this earlier, because it's
+    // possible resize() will get called on an array, causing its internal storage to be
+    // recreated.
+
+    for (int i = 0; i < arrayArgs.size(); i++)
+        if (arrayArgs[i] != NULL)
+            kernel.setArg<cl::Buffer>(i, arrayArgs[i]->getDeviceBuffer());
+    context.executeKernelBlocks(kernel, blocks, blockSize);
 }
 
 void OpenCLKernel::addArrayArg(ArrayInterface& value) {

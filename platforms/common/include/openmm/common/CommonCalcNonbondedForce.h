@@ -140,6 +140,13 @@ private:
     // Real-space ESP spreading window and derivative polynomial coefficients.
     ComputeArray espSpreadCoeffs;
     ComputeArray espSpreadDerCoeffs;
+    ComputeArray espOutputTileAtomGridPosition;
+    ComputeArray espOutputTileBinSize;
+    ComputeArray espOutputTileBinStart;
+    ComputeArray espOutputTileSortIndex;
+    ComputeArray espOutputTileSortedAtoms;
+    ComputeArray espOutputTileScanBlockSums;
+    ComputeArray espOutputTileScanBlockOffsets;
     ComputeArray pmeDispersionBsplineModuliX;
     ComputeArray pmeDispersionBsplineModuliY;
     ComputeArray pmeDispersionBsplineModuliZ;
@@ -157,6 +164,8 @@ private:
     ComputeKernel ewaldSumsKernel, ewaldForcesKernel;
     ComputeKernel pmeGridIndexKernel, pmeDispersionGridIndexKernel;
     ComputeKernel pmeSpreadChargeKernel, pmeDispersionSpreadChargeKernel;
+    ComputeKernel pmeOutputTileInitBinsKernel, pmeOutputTileCountBinsKernel, pmeOutputTileScanBinsKernel;
+    ComputeKernel pmeOutputTileScanBlockSumsKernel, pmeOutputTileScatterAtomsKernel;
     ComputeKernel pmeFinishSpreadChargeKernel, pmeDispersionFinishSpreadChargeKernel;
     ComputeKernel pmeConvolutionKernel, pmeDispersionConvolutionKernel;
     ComputeKernel pmeEvalEnergyKernel, pmeDispersionEvalEnergyKernel;
@@ -171,11 +180,13 @@ private:
     double ewaldSelfEnergy, dispersionCoefficient, alpha, dispersionAlpha, totalCharge, espBackgroundEnergyScale, espSelfEnergyScale;
     int gridSizeX, gridSizeY, gridSizeZ;
     int dispersionGridSizeX, dispersionGridSizeY, dispersionGridSizeZ;
+    int espOutputTileNumBins, espOutputTileNumScanBlocks, espOutputTileSpreadThreads;
     int stepsToSort;
     bool usePmeQueue, deviceIsCpu, useFixedPointChargeSpreading, useCpuPme;
-    bool hasCoulomb, hasLJ, doLJPME, useEsp, usePosqCharges, recomputeParams, hasOffsets;
+    bool hasCoulomb, hasLJ, doLJPME, useEsp, useEspOutputTileSpread, usePosqCharges, recomputeParams, hasOffsets;
     NonbondedMethod nonbondedMethod;
     static const int PmeOrder = 5;
+    static const int EspOutputTileScanBlockSize = 1024;
 };
 
 } // namespace OpenMM

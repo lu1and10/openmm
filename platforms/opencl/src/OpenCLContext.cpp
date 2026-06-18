@@ -713,7 +713,12 @@ OpenCLArray& OpenCLContext::unwrap(ArrayInterface& array) const {
 void OpenCLContext::executeKernel(cl::Kernel& kernel, int workUnits, int blockSize) {
     if (blockSize == -1)
         blockSize = ThreadBlockSize;
-    int size = std::min((workUnits+blockSize-1)/blockSize, numThreadBlocks)*blockSize;
+    int blocks = std::min((workUnits+blockSize-1)/blockSize, numThreadBlocks);
+    executeKernelBlocks(kernel, blocks, blockSize);
+}
+
+void OpenCLContext::executeKernelBlocks(cl::Kernel& kernel, int blocks, int blockSize) {
+    int size = blocks*blockSize;
     try {
 #ifdef ENABLE_PROFILING
     cl::Event event;

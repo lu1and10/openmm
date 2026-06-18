@@ -1,6 +1,9 @@
 KERNEL void findAtomGridIndex(GLOBAL const real4* RESTRICT posq, GLOBAL int2* RESTRICT pmeAtomGridIndex,
         real4 periodicBoxSize, real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ,
         real4 recipBoxVecX, real4 recipBoxVecY, real4 recipBoxVecZ
+#ifdef USE_ESP_OUTPUT_TILE_SPREAD
+        , GLOBAL real4* RESTRICT espOutputTileAtomGridPosition
+#endif
     ) {
     // Compute the index of the grid point each atom is associated with.
 
@@ -16,7 +19,15 @@ KERNEL void findAtomGridIndex(GLOBAL const real4* RESTRICT posq, GLOBAL int2* RE
         int3 gridIndex = make_int3(((int) t.x) % GRID_SIZE_X,
                                    ((int) t.y) % GRID_SIZE_Y,
                                    ((int) t.z) % GRID_SIZE_Z);
+#ifdef USE_ESP_OUTPUT_TILE_SPREAD
+        int binX = gridIndex.x/ESP_OUTPUT_TILE_BIN_SIZE;
+        int binY = gridIndex.y/ESP_OUTPUT_TILE_BIN_SIZE;
+        int binZ = gridIndex.z/ESP_OUTPUT_TILE_BIN_SIZE;
+        pmeAtomGridIndex[atom] = make_int2(atom, (binX*ESP_OUTPUT_TILE_NUM_BINS_Y+binY)*ESP_OUTPUT_TILE_NUM_BINS_Z+binZ);
+        espOutputTileAtomGridPosition[atom] = make_real4(t.x, t.y, t.z, pos.w);
+#else
         pmeAtomGridIndex[atom] = make_int2(atom, gridIndex.x*GRID_SIZE_Y*GRID_SIZE_Z+gridIndex.y*GRID_SIZE_Z+gridIndex.z);
+#endif
     }
 }
 
@@ -34,6 +45,76 @@ DEVICE inline real3 espHorner3(GLOBAL const real* RESTRICT coeffs, int index, in
     }
     return value;
 }
+
+#ifdef USE_ESP_OUTPUT_TILE_SPREAD
+
+KERNEL void initOutputTileBins(GLOBAL int* RESTRICT binSize) {
+    for (int bin = GLOBAL_ID; bin < ESP_OUTPUT_TILE_NUM_BINS; bin += GLOBAL_SIZE)
+        binSize[bin] = 0;
+}
+
+KERNEL void countOutputTileBinSizes(GLOBAL const int2* RESTRICT pmeAtomGridIndex, GLOBAL int* RESTRICT binSize,
+        GLOBAL int* RESTRICT sortIndex) {
+    for (int atom = GLOBAL_ID; atom < NUM_ATOMS; atom += GLOBAL_SIZE) {
+        int bin = pmeAtomGridIndex[atom].y;
+        sortIndex[atom] = ATOMIC_ADD(&binSize[bin], 1);
+    }
+}
+
+KERNEL void scanOutputTileBinSizes(GLOBAL const int* RESTRICT binSize, GLOBAL int* RESTRICT binStart,
+        GLOBAL int* RESTRICT scanBlockSums) {
+    LOCAL int temp[ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE];
+    int local = LOCAL_ID;
+    int index = GROUP_ID*ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE+local;
+    int value = (index < ESP_OUTPUT_TILE_NUM_BINS ? binSize[index] : 0);
+    temp[local] = value;
+    SYNC_THREADS
+
+    for (int offset = 1; offset < ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE; offset <<= 1) {
+        int add = (local >= offset ? temp[local-offset] : 0);
+        SYNC_THREADS
+        temp[local] += add;
+        SYNC_THREADS
+    }
+    if (index < ESP_OUTPUT_TILE_NUM_BINS)
+        binStart[index] = temp[local]-value;
+    if (local == ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE-1)
+        scanBlockSums[GROUP_ID] = temp[local];
+}
+
+KERNEL void scanOutputTileBlockSums(GLOBAL const int* RESTRICT scanBlockSums,
+        GLOBAL int* RESTRICT scanBlockOffsets) {
+    LOCAL int temp[ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE];
+    int local = LOCAL_ID;
+    int value = (local < ESP_OUTPUT_TILE_NUM_SCAN_BLOCKS ? scanBlockSums[local] : 0);
+    temp[local] = value;
+    SYNC_THREADS
+
+    for (int offset = 1; offset < ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE; offset <<= 1) {
+        int add = (local >= offset ? temp[local-offset] : 0);
+        SYNC_THREADS
+        temp[local] += add;
+        SYNC_THREADS
+    }
+    if (local < ESP_OUTPUT_TILE_NUM_SCAN_BLOCKS)
+        scanBlockOffsets[local] = temp[local]-value;
+}
+
+KERNEL void scatterOutputTileSortedAtoms(GLOBAL const int2* RESTRICT pmeAtomGridIndex,
+        GLOBAL const int* RESTRICT binStart, GLOBAL const int* RESTRICT scanBlockOffsets,
+        GLOBAL const int* RESTRICT sortIndex, GLOBAL int* RESTRICT sortedAtoms) {
+    for (int atom = GLOBAL_ID; atom < NUM_ATOMS; atom += GLOBAL_SIZE) {
+        int bin = pmeAtomGridIndex[atom].y;
+        int block = bin/ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE;
+        sortedAtoms[binStart[bin]+scanBlockOffsets[block]+sortIndex[atom]] = atom;
+    }
+}
+
+DEVICE inline int espOutputTileWrapIndex(int index, int size) {
+    return index < size ? index : index-size;
+}
+
+#endif
 
 #else
 #define SPREAD_ORDER PME_ORDER
@@ -151,6 +232,139 @@ KERNEL void gridSpreadCharge(GLOBAL const real4* RESTRICT posq,
         }
     }
 }
+
+#if defined(USE_ESP) && defined(USE_ESP_OUTPUT_TILE_SPREAD)
+
+KERNEL void gridSpreadChargeOutputTile(GLOBAL const real4* RESTRICT posq,
+#ifdef USE_FIXED_POINT_CHARGE_SPREADING
+        GLOBAL mm_ulong* RESTRICT pmeGrid,
+#else
+        GLOBAL real* RESTRICT pmeGrid,
+#endif
+        real4 periodicBoxSize, real4 invPeriodicBoxSize, real4 periodicBoxVecX, real4 periodicBoxVecY, real4 periodicBoxVecZ,
+        real4 recipBoxVecX, real4 recipBoxVecY, real4 recipBoxVecZ, GLOBAL const int2* RESTRICT pmeAtomGridIndex,
+        GLOBAL const real4* RESTRICT espOutputTileAtomGridPosition, GLOBAL const int* RESTRICT binSize,
+        GLOBAL const int* RESTRICT binStart, GLOBAL const int* RESTRICT scanBlockOffsets,
+        GLOBAL const int* RESTRICT sortedAtoms,
+#ifdef CHARGE_FROM_SIGEPS
+        GLOBAL const float2* RESTRICT sigmaEpsilon,
+#else
+        GLOBAL const real* RESTRICT charges,
+#endif
+        GLOBAL const real* RESTRICT espSpreadCoeffs) {
+#ifdef USE_DOUBLE_PRECISION
+    LOCAL real localGrid[ESP_OUTPUT_TILE_LOCAL_SIZE];
+#else
+    LOCAL real2 localGrid[ESP_OUTPUT_TILE_LOCAL_SIZE];
+#endif
+    LOCAL int3 localStart[ESP_OUTPUT_TILE_NP];
+    LOCAL real chargeData[ESP_OUTPUT_TILE_NP];
+    LOCAL real thetaX[ESP_OUTPUT_TILE_NP*ESP_ORDER];
+    LOCAL real thetaY[ESP_OUTPUT_TILE_NP*ESP_ORDER];
+    LOCAL real thetaZ[ESP_OUTPUT_TILE_NP*ESP_ORDER];
+
+    if (GROUP_ID >= ESP_OUTPUT_TILE_NUM_BINS)
+        return;
+    int bin = GROUP_ID;
+    int block = bin/ESP_OUTPUT_TILE_SCAN_BLOCK_SIZE;
+    int segmentStart = binStart[bin]+scanBlockOffsets[block];
+    int segmentLimit = binStart[bin]+scanBlockOffsets[block]+binSize[bin];
+    int segmentEnd = segmentLimit;
+
+    int tmp = bin;
+    int binZ = tmp%ESP_OUTPUT_TILE_NUM_BINS_Z;
+    tmp /= ESP_OUTPUT_TILE_NUM_BINS_Z;
+    int binY = tmp%ESP_OUTPUT_TILE_NUM_BINS_Y;
+    int binX = tmp/ESP_OUTPUT_TILE_NUM_BINS_Y;
+    int3 binOffset = make_int3(binX*ESP_OUTPUT_TILE_BIN_SIZE, binY*ESP_OUTPUT_TILE_BIN_SIZE, binZ*ESP_OUTPUT_TILE_BIN_SIZE);
+
+    for (int i = LOCAL_ID; i < ESP_OUTPUT_TILE_LOCAL_SIZE; i += LOCAL_SIZE)
+#ifdef USE_DOUBLE_PRECISION
+        localGrid[i] = 0;
+#else
+        localGrid[i] = make_real2(0, 0);
+#endif
+    SYNC_THREADS
+
+    for (int batchStart = segmentStart; batchStart < segmentEnd; batchStart += ESP_OUTPUT_TILE_NP) {
+        int batchSize = segmentEnd-batchStart;
+        batchSize = (batchSize < ESP_OUTPUT_TILE_NP ? batchSize : ESP_OUTPUT_TILE_NP);
+        if (LOCAL_ID < batchSize) {
+            int sortedIndex = batchStart+LOCAL_ID;
+            int atom = sortedAtoms[sortedIndex];
+            real4 t = espOutputTileAtomGridPosition[atom];
+            real4 pos = make_real4(0, 0, 0, t.w);
+#ifdef CHARGE_FROM_SIGEPS
+            const float2 sigEps = sigmaEpsilon[atom];
+            const real charge = 8*sigEps.x*sigEps.x*sigEps.x*sigEps.y;
+#else
+            const real charge = (CHARGE)*EPSILON_FACTOR;
+#endif
+            chargeData[LOCAL_ID] = charge;
+            int3 gridIndex = make_int3((int) t.x, (int) t.y, (int) t.z);
+            localStart[LOCAL_ID] = make_int3(gridIndex.x-binOffset.x, gridIndex.y-binOffset.y, gridIndex.z-binOffset.z);
+            real3 dr = make_real3(t.x-(int) t.x, t.y-(int) t.y, t.z-(int) t.z);
+#pragma unroll
+            for (int j = 0; j < ESP_ORDER; j++) {
+                real3 theta = espHorner3(espSpreadCoeffs, j, ESP_ORDER, ESP_POLY_ORDER, dr);
+                thetaX[LOCAL_ID*ESP_ORDER+j] = theta.x;
+                thetaY[LOCAL_ID*ESP_ORDER+j] = theta.y;
+                thetaZ[LOCAL_ID*ESP_ORDER+j] = theta.z;
+            }
+        }
+        SYNC_THREADS
+
+        const int stencilSize = ESP_ORDER*ESP_ORDER*ESP_ORDER;
+        for (int p = 0; p < batchSize; p++) {
+            real charge = chargeData[p];
+            int3 start = localStart[p];
+            for (int index = LOCAL_ID; index < stencilSize; index += LOCAL_SIZE) {
+                int tmp = index;
+                int ix = tmp%ESP_ORDER;
+                int localIndex = (start.x+ix)*ESP_OUTPUT_TILE_PADDED_SIZE*ESP_OUTPUT_TILE_PADDED_SIZE;
+                real add = thetaX[p*ESP_ORDER+ix];
+                tmp /= ESP_ORDER;
+                int iy = tmp%ESP_ORDER;
+                localIndex += ESP_OUTPUT_TILE_PADDED_SIZE*(start.y+iy);
+                add *= thetaY[p*ESP_ORDER+iy];
+                tmp /= ESP_ORDER;
+                int iz = tmp;
+                localIndex += start.z+iz;
+                add *= charge*thetaZ[p*ESP_ORDER+iz];
+#ifdef USE_DOUBLE_PRECISION
+                localGrid[localIndex] += add;
+#else
+                localGrid[localIndex].x += add;
+#endif
+            }
+            SYNC_THREADS
+        }
+    }
+
+    for (int i = LOCAL_ID; i < ESP_OUTPUT_TILE_LOCAL_SIZE; i += LOCAL_SIZE) {
+#ifdef USE_DOUBLE_PRECISION
+        real add = localGrid[i];
+#else
+        real add = localGrid[i].x;
+#endif
+        int tmp = i;
+        int localZ = tmp%ESP_OUTPUT_TILE_PADDED_SIZE;
+        tmp /= ESP_OUTPUT_TILE_PADDED_SIZE;
+        int localY = tmp%ESP_OUTPUT_TILE_PADDED_SIZE;
+        int localX = tmp/ESP_OUTPUT_TILE_PADDED_SIZE;
+        int x = espOutputTileWrapIndex(binOffset.x+localX, GRID_SIZE_X);
+        int y = espOutputTileWrapIndex(binOffset.y+localY, GRID_SIZE_Y);
+        int z = espOutputTileWrapIndex(binOffset.z+localZ, GRID_SIZE_Z);
+        int gridIndex = (x*GRID_SIZE_Y+y)*GRID_SIZE_Z+z;
+#ifdef USE_FIXED_POINT_CHARGE_SPREADING
+        ATOMIC_ADD(&pmeGrid[gridIndex], (mm_ulong) realToFixedPoint(add));
+#else
+        ATOMIC_ADD(&pmeGrid[gridIndex], add);
+#endif
+    }
+}
+
+#endif
 
 #ifdef USE_FIXED_POINT_CHARGE_SPREADING
 

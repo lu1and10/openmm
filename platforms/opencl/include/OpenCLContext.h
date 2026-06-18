@@ -352,6 +352,14 @@ public:
      */
     void executeKernel(cl::Kernel& kernel, int workUnits, int blockSize = -1);
     /**
+     * Execute a kernel with an exact number of thread blocks.
+     *
+     * @param kernel       the kernel to execute
+     * @param blocks       the number of thread blocks to launch
+     * @param blockSize    the size of each thread block to use
+     */
+    void executeKernelBlocks(cl::Kernel& kernel, int blocks, int blockSize);
+    /**
      * Compute the largest thread block size that can be used for a kernel that requires a particular amount of
      * shared memory per thread.
      * 

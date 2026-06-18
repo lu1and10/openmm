@@ -58,6 +58,18 @@ void CudaKernel::execute(int threads, int blockSize) {
     context.executeKernel(kernel, argPointers.data(), threads, blockSize);
 }
 
+void CudaKernel::executeBlocks(int blocks, int blockSize) {
+    int numArgs = arrayArgs.size();
+    argPointers.resize(numArgs);
+    for (int i = 0; i < numArgs; i++) {
+        if (arrayArgs[i] != NULL)
+            argPointers[i] = &arrayArgs[i]->getDevicePointer();
+        else
+            argPointers[i] = &primitiveArgs[i];
+    }
+    context.executeKernelBlocks(kernel, argPointers.data(), blocks, blockSize);
+}
+
 void CudaKernel::addArrayArg(ArrayInterface& value) {
     int index = arrayArgs.size();
     addEmptyArg();

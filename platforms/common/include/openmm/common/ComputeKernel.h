@@ -108,6 +108,17 @@ public:
      *                     default size that is appropriate for the computing device is used.
      */
     virtual void execute(int threads, int blockSize=-1) = 0;
+    /**
+     * Execute this kernel with an exact number of thread blocks.  Most code should use
+     * execute(); this is for algorithms whose block index is part of the algorithmic
+     * decomposition rather than just a work-unit scheduler.
+     *
+     * @param blocks       the number of thread blocks to launch
+     * @param blockSize    the number of threads in each thread block
+     */
+    virtual void executeBlocks(int blocks, int blockSize) {
+        execute(blocks*blockSize, blockSize);
+    }
 protected:
     /**
      * Add an argument to pass the kernel when it is invoked, where the value is a

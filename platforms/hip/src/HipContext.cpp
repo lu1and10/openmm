@@ -754,7 +754,11 @@ void HipContext::executeKernel(hipFunction_t kernel, void** arguments, int threa
     if (blockSize == -1)
         blockSize = ThreadBlockSize;
     int gridSize = std::min((threads+blockSize-1)/blockSize, numThreadBlocks);
-    hipError_t result = hipModuleLaunchKernel(kernel, gridSize, 1, 1, blockSize, 1, 1, sharedSize, getCurrentStream(), arguments, NULL);
+    executeKernelBlocks(kernel, arguments, gridSize, blockSize, sharedSize);
+}
+
+void HipContext::executeKernelBlocks(hipFunction_t kernel, void** arguments, int blocks, int blockSize, unsigned int sharedSize) {
+    hipError_t result = hipModuleLaunchKernel(kernel, blocks, 1, 1, blockSize, 1, 1, sharedSize, getCurrentStream(), arguments, NULL);
     if (result != hipSuccess) {
         stringstream str;
         str<<"Error invoking kernel: "<<getErrorString(result)<<" ("<<result<<")";

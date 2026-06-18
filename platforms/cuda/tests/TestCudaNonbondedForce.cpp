@@ -30,7 +30,40 @@
 #include "CudaTests.h"
 #include "TestNonbondedForce.h"
 #include <cuda.h>
+#include <cstdlib>
 #include <string>
+
+namespace {
+
+void setEspOutputTileEnv(const char* value) {
+#ifdef WIN32
+    _putenv_s("OPENMM_NONBONDED_ESP_OUTPUT_TILE_SPREAD", value == NULL ? "" : value);
+#else
+    if (value == NULL)
+        unsetenv("OPENMM_NONBONDED_ESP_OUTPUT_TILE_SPREAD");
+    else
+        setenv("OPENMM_NONBONDED_ESP_OUTPUT_TILE_SPREAD", value, 1);
+#endif
+}
+
+class ScopedEspOutputTileEnv {
+public:
+    ScopedEspOutputTileEnv(const char* value) {
+        const char* old = getenv("OPENMM_NONBONDED_ESP_OUTPUT_TILE_SPREAD");
+        hasOldValue = (old != NULL);
+        if (hasOldValue)
+            oldValue = old;
+        setEspOutputTileEnv(value);
+    }
+    ~ScopedEspOutputTileEnv() {
+        setEspOutputTileEnv(hasOldValue ? oldValue.c_str() : NULL);
+    }
+private:
+    bool hasOldValue;
+    std::string oldValue;
+};
+
+}
 
 void testDeterministicForces() {
     // Check that the CudaDeterministicForces property works correctly.
@@ -188,6 +221,31 @@ void testEspExcludedPairBeyondCutoff() {
     ASSERT_EQUAL_TOL(0.0, state.getForces()[0][2], 1e-5);
 }
 
+void testEspForcedOutputTileFallsBackWhenScratchIsTooLarge() {
+    ScopedEspOutputTileEnv env("1");
+    System system;
+    system.setDefaultPeriodicBoxVectors(Vec3(4, 0, 0), Vec3(0, 4, 0), Vec3(0, 0, 4));
+    NonbondedForce* nonbonded = new NonbondedForce();
+    nonbonded->setNonbondedMethod(NonbondedForce::PME);
+    nonbonded->setReciprocalSpaceKernelType(NonbondedForce::ESPKernel);
+    nonbonded->setCutoffDistance(0.9);
+    nonbonded->setEwaldErrorTolerance(1e-6);
+    nonbonded->setUseDispersionCorrection(false);
+    system.addForce(nonbonded);
+    system.addParticle(1.0);
+    system.addParticle(1.0);
+    nonbonded->addParticle(1.0, 1.0, 0.0);
+    nonbonded->addParticle(-1.0, 1.0, 0.0);
+
+    VerletIntegrator integrator(0.001);
+    map<string, string> properties;
+    properties["Precision"] = "double";
+    Context context(system, integrator, platform, properties);
+    context.setPositions({Vec3(0, 0, 0), Vec3(0.4, 0, 0)});
+    State state = context.getState(State::Forces | State::Energy);
+    ASSERT_EQUAL(2, state.getForces().size());
+}
+
 void computePmeKernelForces(NonbondedForce::ReciprocalSpaceKernelType kernel, bool useChargeOffsets, double tolerance,
         double& energy, vector<Vec3>& forces) {
     const int cells = 6;
@@ -287,6 +345,7 @@ void runPlatformTests() {
     testEspRequiresPme();
     testEspDirectSpaceUsesPswfSplit();
     testEspExcludedPairBeyondCutoff();
+    testEspForcedOutputTileFallsBackWhenScratchIsTooLarge();
     testEspMatchesPmeCoulomb();
     testEspMatchesPmeCoulombWithChargeOffsets();
     testReordering();

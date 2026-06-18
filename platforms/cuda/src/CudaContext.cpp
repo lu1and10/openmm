@@ -708,7 +708,11 @@ void CudaContext::executeKernel(CUfunction kernel, void** arguments, int threads
     if (blockSize == -1)
         blockSize = ThreadBlockSize;
     int gridSize = std::min((threads+blockSize-1)/blockSize, numThreadBlocks);
-    CUresult result = cuLaunchKernel(kernel, gridSize, 1, 1, blockSize, 1, 1, sharedSize, getCurrentStream(), arguments, NULL);
+    executeKernelBlocks(kernel, arguments, gridSize, blockSize, sharedSize);
+}
+
+void CudaContext::executeKernelBlocks(CUfunction kernel, void** arguments, int blocks, int blockSize, unsigned int sharedSize) {
+    CUresult result = cuLaunchKernel(kernel, blocks, 1, 1, blockSize, 1, 1, sharedSize, getCurrentStream(), arguments, NULL);
     if (result != CUDA_SUCCESS) {
         stringstream str;
         str<<"Error invoking kernel: "<<getErrorString(result)<<" ("<<result<<")";

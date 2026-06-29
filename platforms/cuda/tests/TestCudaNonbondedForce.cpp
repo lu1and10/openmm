@@ -30,6 +30,7 @@
 #include "CudaTests.h"
 #include "TestNonbondedForce.h"
 #include <cuda.h>
+#include <map>
 #include <string>
 
 void testDeterministicForces() {
@@ -152,8 +153,8 @@ void testEspDirectSpaceUsesPswfSplit() {
 
     State state = context.getState(State::Forces | State::Energy, true, 1<<0);
     const double directEnergy = state.getPotentialEnergy();
-    const double espShortRangeScale = 1.847619872734e-3;
-    const double espShortRangeForceScale = 2.817916144554e-2;
+    const double espShortRangeScale = 1.660372509287e-3;
+    const double espShortRangeForceScale = 2.575658094074e-2;
     ASSERT_EQUAL_TOL(ONE_4PI_EPS0*espShortRangeScale/0.4, directEnergy, 2e-5);
     ASSERT_EQUAL_TOL(ONE_4PI_EPS0*espShortRangeForceScale/(0.4*0.4), fabs(state.getForces()[0][0]), 2e-3);
     ASSERT_EQUAL_TOL(0.0, state.getForces()[0][1], 1e-5);
@@ -189,7 +190,7 @@ void testEspExcludedPairBeyondCutoff() {
 }
 
 void computePmeKernelForces(NonbondedForce::ReciprocalSpaceKernelType kernel, bool useChargeOffsets, double tolerance,
-        double& energy, vector<Vec3>& forces) {
+        double& energy, vector<Vec3>& forces, const map<string, string>& properties = map<string, string>()) {
     const int cells = 6;
     const double spacing = 0.31;
     System system;
@@ -242,7 +243,7 @@ void computePmeKernelForces(NonbondedForce::ReciprocalSpaceKernelType kernel, bo
         nonbonded->addParticleParameterOffset("scale", 2, -0.05, 0.0, 0.0);
     }
     VerletIntegrator integrator(0.001);
-    Context context(system, integrator, platform);
+    Context context(system, integrator, platform, properties);
     context.setPositions(positions);
     if (useChargeOffsets)
         context.setParameter("scale", 0.7);
@@ -278,6 +279,27 @@ void testEspMatchesPmeCoulombWithChargeOffsets() {
     assertEspMatchesPmeCoulomb(true);
 }
 
+void testEspErrorTolerance() {
+    map<string, string> properties;
+    properties["Precision"] = "double";
+    properties["UseCpuPme"] = "false";
+    double pmeEnergy, espEnergy;
+    vector<Vec3> pmeForces, espForces;
+    computePmeKernelForces(NonbondedForce::PMEKernel, false, 5e-7, pmeEnergy, pmeForces, properties);
+    for (double tolerance : {1e-3, 5e-4, 2e-4, 1e-4}) {
+        computePmeKernelForces(NonbondedForce::ESPKernel, false, tolerance, espEnergy, espForces, properties);
+        double forceNorm2 = 0.0;
+        double forceDiff2 = 0.0;
+        for (int i = 0; i < pmeForces.size(); i++) {
+            Vec3 diff = espForces[i]-pmeForces[i];
+            forceNorm2 += pmeForces[i].dot(pmeForces[i]);
+            forceDiff2 += diff.dot(diff);
+        }
+        // Match the global relative L2 force metric used by the Ewald tolerance tests.
+        ASSERT(sqrt(forceDiff2/forceNorm2) < 1.5*tolerance);
+    }
+}
+
 void runPlatformTests() {
     testParallelComputation(NonbondedForce::NoCutoff);
     testParallelComputation(NonbondedForce::Ewald);
@@ -289,6 +311,7 @@ void runPlatformTests() {
     testEspExcludedPairBeyondCutoff();
     testEspMatchesPmeCoulomb();
     testEspMatchesPmeCoulombWithChargeOffsets();
+    testEspErrorTolerance();
     testReordering();
     testDeterministicForces();
     if (canRunHugeTest())

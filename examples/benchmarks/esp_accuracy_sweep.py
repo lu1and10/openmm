@@ -224,8 +224,9 @@ def evaluate(system, positions, platform, properties):
 
 
 def force_metrics(test_forces, ref_forces, test_energy: float, ref_energy: float) -> dict[str, float]:
-    diff2 = ref2 = sum_abs_diff = sum_abs_ref = max_abs_diff = 0.0
+    diff2 = ref2 = sum_abs_diff = sum_abs_ref = sum_particle_rel = max_abs_diff = 0.0
     count = 0
+    particle_rel_count = 0
     for f, r in zip(test_forces, ref_forces):
         dx, dy, dz = f[0] - r[0], f[1] - r[1], f[2] - r[2]
         local_diff2 = dx*dx + dy*dy + dz*dz
@@ -236,12 +237,16 @@ def force_metrics(test_forces, ref_forces, test_energy: float, ref_energy: float
         ref2 += local_ref2
         sum_abs_diff += abs_diff
         sum_abs_ref += abs_ref
+        if abs_ref > 0.0:
+            sum_particle_rel += abs_diff/abs_ref
+            particle_rel_count += 1
         max_abs_diff = max(max_abs_diff, abs_diff)
         count += 1
     return {
         "energy_rel": abs(test_energy - ref_energy)/max(abs(ref_energy), 1.0),
         "force_rel_l2": math.sqrt(diff2/ref2),
         "force_mean_rel": sum_abs_diff/sum_abs_ref,
+        "force_mean_particle_rel": sum_particle_rel/particle_rel_count if particle_rel_count else 0.0,
         "force_rms_abs": math.sqrt(diff2/count),
         "force_mean_abs": sum_abs_diff/count,
         "force_max_abs": max_abs_diff,
@@ -283,6 +288,7 @@ def run_case(system_name: str, method: str, cutoff: float, tolerance: float, ref
     }
     row.update(force_metrics(forces, reference["forces"], energy, reference["energy"]))
     row["force_ratio"] = row["force_rel_l2"]/tolerance
+    row["force_mean_particle_ratio"] = row["force_mean_particle_rel"]/tolerance
     return row
 
 
@@ -314,27 +320,44 @@ def row_key(row: dict) -> tuple[float, float]:
 
 def summarize(rows: list[dict], cutoffs: tuple[float, ...], tolerances: tuple[float, ...]) -> None:
     print("\nSummary:\n")
-    for method in DEFAULT_METHODS:
-        method_rows = [row for row in rows if row["method"] == method]
-        bad = sum(row["force_ratio"] > 1.5 for row in method_rows)
-        worst = max(method_rows, key=lambda row: row["force_ratio"])
-        print(f"  {method} rows {len(method_rows)}, rows > 1.5x tol: {bad}")
-        print(
-            f"  {method} worst: {worst['system_label']} rc={worst['cutoff_nm']:g} "
-            f"tol={fmt_tol(worst['tolerance'])} ratio={worst['force_ratio']:.6f}\n")
+    print("  global L2 matches OpenMM's Ewald tolerance tests; mean particle is a small-force-sensitive diagnostic.\n")
+    methods = tuple(method for method in DEFAULT_METHODS if any(row["method"] == method for row in rows))
+    summary_metrics = (
+        ("global L2", "force_ratio"),
+        ("mean particle", "force_mean_particle_ratio"),
+    )
+    for label, metric in summary_metrics:
+        print(f"  {label}:")
+        for method in methods:
+            method_rows = [row for row in rows if row["method"] == method]
+            bad = sum(row[metric] > 1.5 for row in method_rows)
+            worst = max(method_rows, key=lambda row: row[metric])
+            print(f"    {method} rows {len(method_rows)}, rows > 1.5x tol: {bad}")
+            print(
+                f"    {method} worst: {worst['system_label']} rc={worst['cutoff_nm']:g} "
+                f"tol={fmt_tol(worst['tolerance'])} ratio={worst[metric]:.6f}")
+        print()
 
     by_method_key = {(row["method"],) + row_key(row): row for row in rows}
-    print("P / Order Table\n")
-    print("  rc    ESP:" + " ".join(f"{fmt_tol(tol):>4}" for tol in tolerances) + "    PME")
-    for cutoff in cutoffs:
-        esp_orders = [by_method_key[("ESP", cutoff, tol)]["order"] for tol in tolerances]
-        print(f"  {cutoff:4.2f}   " + " ".join(f"{order:4d}" for order in esp_orders) + "        5")
+    if "ESP" in methods:
+        print("P / Order Table\n")
+        print("  rc    ESP:" + " ".join(f"{fmt_tol(tol):>4}" for tol in tolerances) + "    PME")
+        for cutoff in cutoffs:
+            esp_orders = [by_method_key[("ESP", cutoff, tol)]["order"] for tol in tolerances]
+            print(f"  {cutoff:4.2f}   " + " ".join(f"{order:4d}" for order in esp_orders) + "        5")
 
-    for method in DEFAULT_METHODS:
-        print(f"\nWorst Force Error Ratio: {method}\n")
+    for method in methods:
+        print(f"\nWorst Force Error Ratio, Global L2: {method}\n")
         print("  rc   " + " ".join(f"{fmt_tol(tol):>6}" for tol in tolerances))
         for cutoff in cutoffs:
             ratios = [by_method_key[(method, cutoff, tol)]["force_ratio"] for tol in tolerances]
+            print(f"  {cutoff:4.2f} " + " ".join(f"{ratio:6.3f}" for ratio in ratios))
+
+    for method in methods:
+        print(f"\nWorst Force Error Ratio, Mean Particle: {method}\n")
+        print("  rc   " + " ".join(f"{fmt_tol(tol):>6}" for tol in tolerances))
+        for cutoff in cutoffs:
+            ratios = [by_method_key[(method, cutoff, tol)]["force_mean_particle_ratio"] for tol in tolerances]
             print(f"  {cutoff:4.2f} " + " ".join(f"{ratio:6.3f}" for ratio in ratios))
 
 

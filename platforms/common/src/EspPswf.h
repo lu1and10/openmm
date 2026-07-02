@@ -500,16 +500,29 @@ static inline double getProlateC(double tol) {
     return c;
 }
 
-static inline int estimateEspOrder(double tol) {
+static inline int estimateEspOrder(double tol, double cutoff) {
     if (tol <= 0.0 || tol >= 1.0)
         throw std::invalid_argument("estimateEspOrder: tolerance must be in (0, 1)");
-    double p = -std::log10(tol);
+    if (cutoff <= 0.0)
+        throw std::invalid_argument("estimateEspOrder: cutoff must be positive");
+    const double setupTol = tol*std::sqrt(cutoff);
+    double p = -std::log10(setupTol);
     double rounded = std::round(p);
     int order;
     if (std::abs(p-rounded) < 0.2)
         order = 2*(int) rounded - 2;
     else
         order = 2*(int) std::ceil(p) - 3;
+
+    if (tol <= 1e-4)
+        order = std::max(order, cutoff < 0.7 ? 7 : 6);
+    else if (tol <= 2e-4)
+        order = std::max(order, cutoff < 0.5 ? 7 : (cutoff < 1.0 ? 6 : 5));
+    else if (tol <= 5e-4)
+        order = std::max(order, cutoff < 0.9 ? 6 : 5);
+    else
+        order = std::max(order, cutoff < 0.5 ? 6 : (cutoff < 0.9 ? 5 : 4));
+
     return std::min(std::max(order, 4), 12);
 }
 
@@ -628,8 +641,8 @@ static inline void monomialInterp1D(int order, int nnodes, std::vector<double>& 
 }
 
 struct EspCoefficients {
-    double splitC;         // Splitting bandwidth (larger, controls Fourier truncation)
-    double windowC;        // Window bandwidth (smaller, controls aliasing; windowC = pi/2 * order)
+    double splitC;         // Splitting bandwidth, controls Fourier truncation
+    double windowC;        // Window bandwidth, controls spreading aliasing
     double splitIntegral;  // Integral: int_0^1 psi_s(x) dx
     double splitValueAt0;  // psi_s(0)
     double splitLambda;    // Fourier eigenvalue for splitting PSWF
@@ -745,9 +758,8 @@ static inline double computeLambda(const Pswf0& pfun, double c) {
 }
 
 // Build ESP polynomial coefficients with separate splitting and window parameters.
-// Per Bostrom, Tornberg, af Klinteberg (arXiv:2602.16591):
 //   splitC controls the Ewald split (Fourier truncation error ~ e^{-splitC})
-//   windowC controls the window/spreading (aliasing error ~ e^{-windowC}), windowC = pi/2 * order
+//   windowC controls the window/spreading (aliasing error ~ e^{-windowC})
 // Splitting coefficients (splitFourierCoeffs, self-energy) use splitC.
 // Spreading coefficients (spreadCoeffs, deconvolution) use windowC.
 static inline EspCoefficients buildEspCoefficients(double splitC, double windowC, int espOrder,

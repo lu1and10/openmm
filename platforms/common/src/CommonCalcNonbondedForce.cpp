@@ -435,14 +435,16 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
 
         useEsp = (nonbondedMethod == PME && hasCoulomb && force.getReciprocalSpaceKernelType() == NonbondedForce::ESPKernel);
         int espStencilOrder = 0;
+        double espSetupTol = force.getEwaldErrorTolerance();
         if (useEsp) {
-            espStencilOrder = pswf::estimateEspOrder(force.getEwaldErrorTolerance());
+            espSetupTol *= sqrt(force.getCutoffDistance());
+            espStencilOrder = pswf::estimateEspOrder(force.getEwaldErrorTolerance(), force.getCutoffDistance());
             const char* outputTileEnv = getenv("OPENMM_NONBONDED_ESP_OUTPUT_TILE_SPREAD");
             if (outputTileEnv == NULL)
                 useEspOutputTileSpread = (numParticles >= MinAtomsForEspOutputTileSpread);
             else
                 useEspOutputTileSpread = (string(outputTileEnv) != "0");
-            const double prolateC = pswf::getProlateC(force.getEwaldErrorTolerance());
+            const double prolateC = pswf::getProlateC(espSetupTol);
             const double spacing = M_PI*force.getCutoffDistance()/prolateC;
             const int minGridSize = 2*(espStencilOrder-1);
             Vec3 boxVectors[3];
@@ -478,7 +480,9 @@ void CommonCalcNonbondedForceKernel::commonInitialize(const System& system, cons
             const double directForceFac = 1.0;
             const double spreadFac = 10.0;
             const double spreadDerFac = 10.0;
-            espCoeffs = pswf::buildEspCoefficients(force.getEwaldErrorTolerance(), espStencilOrder, 16,
+            const double splitC = pswf::getProlateC(espSetupTol);
+            const double windowC = pswf::getProlateC(0.5*espSetupTol);
+            espCoeffs = pswf::buildEspCoefficients(splitC, windowC, espStencilOrder, espSetupTol, 16,
                                                    directEnergyFac, directForceFac, spreadFac, spreadDerFac);
             espSpreadCoeffOrder = espCoeffs.spreadPolyOrder;
             espSpreadDerCoeffOrder = espCoeffs.spreadDerPolyOrder;

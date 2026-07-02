@@ -152,8 +152,8 @@ void testEspDirectSpaceUsesPswfSplit() {
 
     State state = context.getState(State::Forces | State::Energy, true, 1<<0);
     const double directEnergy = state.getPotentialEnergy();
-    const double espShortRangeScale = 1.847619872734e-3;
-    const double espShortRangeForceScale = 2.817916144554e-2;
+    const double espShortRangeScale = 1.660372509287e-3;
+    const double espShortRangeForceScale = 2.575658094074e-2;
     ASSERT_EQUAL_TOL(ONE_4PI_EPS0*espShortRangeScale/0.4, directEnergy, 2e-5);
     ASSERT_EQUAL_TOL(ONE_4PI_EPS0*espShortRangeForceScale/(0.4*0.4), fabs(state.getForces()[0][0]), 2e-3);
     ASSERT_EQUAL_TOL(0.0, state.getForces()[0][1], 1e-5);

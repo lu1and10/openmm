@@ -133,9 +133,13 @@ private:
     ComputeArray cosSinSums;
     ComputeArray pmeGrid1;
     ComputeArray pmeGrid2;
+    // B-spline moduli for PME.  For ESP, these hold inverse PSWF window moduli.
     ComputeArray pmeBsplineModuliX;
     ComputeArray pmeBsplineModuliY;
     ComputeArray pmeBsplineModuliZ;
+    // Real-space ESP spreading window and derivative polynomial coefficients.
+    ComputeArray espSpreadCoeffs;
+    ComputeArray espSpreadDerCoeffs;
     ComputeArray pmeDispersionBsplineModuliX;
     ComputeArray pmeDispersionBsplineModuliY;
     ComputeArray pmeDispersionBsplineModuliZ;
@@ -160,15 +164,16 @@ private:
     std::map<std::string, std::string> pmeDefines;
     std::vector<std::pair<int, int> > exceptionAtoms;
     std::vector<std::string> paramNames;
+    std::vector<double> espSplitCoeffValues;
     std::map<std::string, int> paramIndices;
     std::map<std::string, double> paramValues;
     std::map<int, int> exceptionIndex;
-    double ewaldSelfEnergy, dispersionCoefficient, alpha, dispersionAlpha, totalCharge;
+    double ewaldSelfEnergy, dispersionCoefficient, alpha, dispersionAlpha, totalCharge, espBackgroundEnergyScale, espSelfEnergyScale;
     int gridSizeX, gridSizeY, gridSizeZ;
     int dispersionGridSizeX, dispersionGridSizeY, dispersionGridSizeZ;
     int stepsToSort;
     bool usePmeQueue, deviceIsCpu, useFixedPointChargeSpreading, useCpuPme;
-    bool hasCoulomb, hasLJ, doLJPME, usePosqCharges, recomputeParams, hasOffsets;
+    bool hasCoulomb, hasLJ, doLJPME, useEsp, usePosqCharges, recomputeParams, hasOffsets;
     NonbondedMethod nonbondedMethod;
     static const int PmeOrder = 5;
 };

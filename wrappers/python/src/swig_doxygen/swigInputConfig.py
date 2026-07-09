@@ -224,6 +224,7 @@ UNITS = {
 ("*", "getWeight13") : (None, ()),
 ("*", "getWeightCross") : (None, ()),
 ("*", "getNonbondedMethod") : (None, ()),
+("*", "getReciprocalSpaceKernelType") : (None, ()),
 ("*", "getGlobalParameterDefaultValue") : (None, ()),
 ("*", "getPermutationMode") : (None, ()),
 ("*", "computeSystemTemperature") : ("unit.kelvin", ()),
